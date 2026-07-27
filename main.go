@@ -38,6 +38,7 @@ uso:
   leetbot solve <id|slug> [flags]   resolve um problema
   leetbot run [flags]               resolve vários problemas em sequência
   leetbot stats [flags]             resumo do estado salvo
+  leetbot dash [flags]              painel ao vivo do progresso da conta
 
 autenticação (variáveis de ambiente obrigatórias):
   LEETCODE_SESSION   cookie LEETCODE_SESSION do navegador
@@ -69,6 +70,8 @@ func run() error {
 		return cmdRun(ctx, os.Args[2:])
 	case "stats":
 		return cmdStats(os.Args[2:])
+	case "dash":
+		return cmdDash(ctx, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -361,7 +364,160 @@ func cmdStats(args []string) error {
 	return nil
 }
 
+func cmdDash(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("dash", flag.ExitOnError)
+	user := fs.String("user", "", "username a consultar (padrão: a conta conectada)")
+	statePath := fs.String("state", "state.json", "arquivo de progresso do bot")
+	every := fs.Duration("every", 10*time.Second, "intervalo de atualização do painel")
+	once := fs.Bool("once", false, "imprime uma vez e sai, em vez de ficar ao vivo")
+	_ = fs.Parse(args)
+	if *every < time.Second {
+		return fmt.Errorf("-every mínimo é 1s (evita bater no rate limit)")
+	}
+
+	c, err := newClient(500 * time.Millisecond)
+	if err != nil {
+		return err
+	}
+	username := *user
+	if username == "" {
+		st, err := c.Whoami(ctx)
+		if err != nil {
+			return err
+		}
+		username = st.Username
+	}
+	if *once {
+		stats, err := c.FetchAccountStats(ctx, username)
+		if err != nil {
+			return err
+		}
+		fmt.Print(renderDash(stats, *statePath, -1, ""))
+		return nil
+	}
+
+	baseline := -1
+	tick := time.NewTicker(*every)
+	defer tick.Stop()
+	for {
+		stats, err := c.FetchAccountStats(ctx, username)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if all, ok := stats.Bucket("All"); ok && baseline < 0 {
+			baseline = all.Solved
+		}
+		footer := fmt.Sprintf("  %s  ·  atualiza a cada %s  ·  ctrl+c para sair\n",
+			time.Now().Format("15:04:05"), *every)
+		clear := ""
+		if isTerminal(os.Stdout) {
+			// Home + clear-below, so the frame redraws without flicker.
+			clear = "\033[H\033[J"
+		}
+		fmt.Print(clear + renderDash(stats, *statePath, baseline, footer))
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+	}
+}
+
+// renderDash builds one frame. baseline is the solved count at the start of a
+// live session (-1 to omit the delta); footer is appended at the end.
+func renderDash(stats *leetcode.AccountStats, statePath string, baseline int, footer string) string {
+	var b strings.Builder
+	all, _ := stats.Bucket("All")
+
+	fmt.Fprintf(&b, "\n  %s", stats.Username)
+	if stats.Ranking > 0 {
+		fmt.Fprintf(&b, "  ·  rank #%s", thousands(stats.Ranking))
+	}
+	if baseline >= 0 && all.Solved > baseline {
+		fmt.Fprintf(&b, "  ·  +%d nesta sessão", all.Solved-baseline)
+	}
+	fmt.Fprintf(&b, "\n  %s\n\n", strings.Repeat("─", 46))
+
+	for _, name := range []string{"All", "Easy", "Medium", "Hard"} {
+		d, ok := stats.Bucket(name)
+		if !ok {
+			continue
+		}
+		label := name
+		if name == "All" {
+			label = "Total"
+		}
+		fmt.Fprintf(&b, "  %-7s %s %4d/%-5d %5.1f%%", label, bar(d.Solved, d.Total, 22), d.Solved, d.Total, pct(d.Solved, d.Total))
+		if d.Beats > 0 {
+			fmt.Fprintf(&b, "   beats %.1f%%", d.Beats)
+		}
+		b.WriteString("\n")
+	}
+
+	fmt.Fprintf(&b, "\n  %s\n", strings.Repeat("─", 46))
+	fmt.Fprintf(&b, "  submissões       %d aceitas / %d totais (%.1f%%)\n", all.Submissions, stats.TotalSubmissions, pct(all.Submissions, stats.TotalSubmissions))
+	fmt.Fprintf(&b, "  dias ativos      %d  ·  streak atual %d\n", stats.TotalActiveDays, stats.Streak)
+	if stats.Reputation > 0 {
+		fmt.Fprintf(&b, "  reputação        %d\n", stats.Reputation)
+	}
+	if state, err := bot.LoadState(statePath); err == nil {
+		if line := tallyLine(state); line != "" {
+			fmt.Fprintf(&b, "  bot (%s)   %s\n", statePath, line)
+		}
+	}
+	b.WriteString("\n" + footer)
+	return b.String()
+}
+
+func isTerminal(f *os.File) bool {
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+// bar renders a proportional progress bar of the given width.
+func bar(n, total, width int) string {
+	filled := 0
+	if total > 0 {
+		filled = n * width / total
+		if filled == 0 && n > 0 {
+			filled = 1
+		}
+	}
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("·", width-filled) + "]"
+}
+
+func pct(n, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(n) * 100 / float64(total)
+}
+
+// thousands formats an int with "," separators, e.g. 5000000 -> "5,000,000".
+func thousands(n int) string {
+	s := fmt.Sprint(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
+
 func printTally(state *bot.State) {
+	line := tallyLine(state)
+	if line == "" {
+		fmt.Println("\nnenhum problema processado ainda")
+		return
+	}
+	fmt.Printf("\n%s\n", line)
+}
+
+// tallyLine renders the state counts as "total=N status=n ...", or "" when
+// nothing was processed yet.
+func tallyLine(state *bot.State) string {
 	counts := state.Tally()
 	order := []bot.Status{bot.StatusAccepted, bot.StatusTested, bot.StatusFailed, bot.StatusSkipped, bot.StatusError}
 	total := 0
@@ -373,10 +529,9 @@ func printTally(state *bot.State) {
 		}
 	}
 	if total == 0 {
-		fmt.Println("\nnenhum problema processado ainda")
-		return
+		return ""
 	}
-	fmt.Printf("\ntotal=%d %s\n", total, strings.Join(parts, " "))
+	return fmt.Sprintf("total=%d %s", total, strings.Join(parts, " "))
 }
 
 func parseDifficulty(s string) (int, error) {
