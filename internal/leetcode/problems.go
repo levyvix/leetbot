@@ -36,23 +36,30 @@ type Index struct {
 	Entries   []IndexEntry `json:"entries"`
 }
 
+// IsID reports whether ref is a bare frontend id rather than a slug. Slugs may
+// start with digits ("3sum", "2-keys-keyboard"), so the whole string must parse.
+func IsID(ref string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(ref))
+	return n, err == nil
+}
+
 // Lookup finds a problem by frontend id (e.g. "1") or slug (e.g. "two-sum").
-func (idx *Index) Lookup(ref string) (*IndexEntry, bool) {
-	if n, err := strconv.Atoi(strings.TrimSpace(ref)); err == nil {
-		for i := range idx.Entries {
-			if idx.Entries[i].FrontendID == n {
-				return &idx.Entries[i], true
+func (idx *Index) Lookup(ref string) (IndexEntry, bool) {
+	if n, ok := IsID(ref); ok {
+		for _, e := range idx.Entries {
+			if e.FrontendID == n {
+				return e, true
 			}
 		}
-		return nil, false
+		return IndexEntry{}, false
 	}
 	slug := strings.ToLower(strings.TrimSpace(ref))
-	for i := range idx.Entries {
-		if idx.Entries[i].Slug == slug {
-			return &idx.Entries[i], true
+	for _, e := range idx.Entries {
+		if e.Slug == slug {
+			return e, true
 		}
 	}
-	return nil, false
+	return IndexEntry{}, false
 }
 
 // FetchIndex downloads the full problem list. Authenticated, so "solved"
@@ -122,6 +129,11 @@ type CodeSnippet struct {
 	Code     string `json:"code"`
 }
 
+// TopicTag is one category attached to a problem, e.g. "array" or "database".
+type TopicTag struct {
+	Slug string `json:"slug"`
+}
+
 // Question is the full detail of a problem.
 type Question struct {
 	QuestionID       string        `json:"questionId"`
@@ -134,9 +146,7 @@ type Question struct {
 	ExampleTestcases string        `json:"exampleTestcases"`
 	MetaData         string        `json:"metaData"` // JSON string
 	CodeSnippets     []CodeSnippet `json:"codeSnippets"`
-	TopicTags        []struct {
-		Slug string `json:"slug"`
-	} `json:"topicTags"`
+	TopicTags        []TopicTag    `json:"topicTags"`
 }
 
 // Snippet returns the starter code for a language slug.

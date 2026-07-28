@@ -3,6 +3,7 @@ package leetcode
 import (
 	"context"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -168,7 +169,7 @@ func ExtractCode(markdown, langSlug, entryPoint string) []string {
 			continue
 		}
 		// An empty info string is common; accept it and let entryPoint decide.
-		if info != "" && !slicesContains(aliases, info) {
+		if info != "" && !slices.Contains(aliases, info) {
 			continue
 		}
 		if entryPoint != "" && !strings.Contains(body, entryPoint) {
@@ -188,13 +189,4 @@ func normalizeFenceInfo(info string) string {
 		info = info[:i]
 	}
 	return strings.TrimSpace(info)
-}
-
-func slicesContains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }

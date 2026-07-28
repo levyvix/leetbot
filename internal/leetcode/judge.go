@@ -2,6 +2,7 @@ package leetcode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -95,7 +96,9 @@ func (c *Client) SubmitCode(ctx context.Context, q *Question, langSlug, code str
 		"typed_code":   code,
 	}
 	path := "/problems/" + q.TitleSlug + "/submit/"
-	if err := c.postJSON(ctx, path, problemRef(q.TitleSlug), body, &resp); err != nil {
+	// No retry: a 5xx after the judge already queued the submission would
+	// register a duplicate attempt on the account.
+	if err := c.postJSONAttempts(ctx, path, problemRef(q.TitleSlug), body, &resp, 1); err != nil {
 		return nil, err
 	}
 	if resp.SubmissionID == 0 {
@@ -110,12 +113,19 @@ func (c *Client) PollResult(ctx context.Context, id string) (*CheckResult, error
 		maxWait = 90 * time.Second
 		tick    = 700 * time.Millisecond
 	)
-	deadline := time.Now().Add(maxWait)
-	path := "/submissions/detail/" + id + "/check/"
+	ctx, cancel := context.WithTimeout(ctx, maxWait)
+	defer cancel()
 
-	for time.Now().Before(deadline) {
+	path := "/submissions/detail/" + id + "/check/"
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+
+	for {
 		var r CheckResult
 		if err := c.getJSON(ctx, path, BaseURL+"/", &r); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("timeout esperando o julgamento de %s", id)
+			}
 			return nil, err
 		}
 		if r.State != "PENDING" && r.State != "STARTED" {
@@ -123,11 +133,10 @@ func (c *Client) PollResult(ctx context.Context, id string) (*CheckResult, error
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(tick):
+			return nil, fmt.Errorf("timeout esperando o julgamento de %s: %w", id, ctx.Err())
+		case <-ticker.C:
 		}
 	}
-	return nil, fmt.Errorf("timeout esperando o julgamento de %s", id)
 }
 
 func problemRef(slug string) string {
