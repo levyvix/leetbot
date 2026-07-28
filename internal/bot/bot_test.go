@@ -26,6 +26,9 @@ type fakeAPI struct {
 	run    *leetcode.CheckResult
 	submit *leetcode.CheckResult
 
+	// submitFn, when set, overrides submit/submitErr per call.
+	submitFn func() (*leetcode.CheckResult, error)
+
 	runs    int
 	submits int
 }
@@ -49,6 +52,9 @@ func (f *fakeAPI) RunCode(context.Context, *leetcode.Question, string, string, s
 
 func (f *fakeAPI) SubmitCode(context.Context, *leetcode.Question, string, string) (*leetcode.CheckResult, error) {
 	f.submits++
+	if f.submitFn != nil {
+		return f.submitFn()
+	}
 	return f.submit, f.submitErr
 }
 
@@ -268,6 +274,70 @@ func TestRunStopsOnCancelledContext(t *testing.T) {
 	}
 	if api.runs != 0 {
 		t.Errorf("Run executou %d candidato(s) com contexto cancelado", api.runs)
+	}
+}
+
+func TestSolveAbandonsProblemWhenRateLimited(t *testing.T) {
+	api := solvable()
+	api.content = "```python3\nclass Solution:\n    def twoSum(self): pass\n```\n" +
+		"```python3\nclass Solution:\n    def twoSum(self): return 1\n```\n"
+	api.submit, api.submitErr = nil, fmt.Errorf("submit: %w", leetcode.ErrRateLimited)
+
+	cfg := testCfg()
+	cfg.Submit = true
+	out, err := New(api, cfg, nil).Solve(t.Context(), leetcode.IndexEntry{Slug: "two-sum"})
+	if !errors.Is(err, leetcode.ErrRateLimited) {
+		t.Fatalf("Solve err = %v, want ErrRateLimited (Run conta os consecutivos)", err)
+	}
+	if out.Status != StatusError {
+		t.Errorf("status = %s, want %s", out.Status, StatusError)
+	}
+	if api.submits != 1 {
+		t.Errorf("%d submissões, want 1 — o próximo candidato tomaria 429 igual", api.submits)
+	}
+}
+
+func TestRunStopsAfterConsecutiveRateLimits(t *testing.T) {
+	api := solvable()
+	api.submit, api.submitErr = nil, fmt.Errorf("submit: %w", leetcode.ErrRateLimited)
+
+	cfg := testCfg()
+	cfg.Submit = true
+	queue := make([]leetcode.IndexEntry, 20)
+	for i := range queue {
+		queue[i] = leetcode.IndexEntry{Slug: fmt.Sprintf("p%d", i), FrontendID: i}
+	}
+
+	err := New(api, cfg, nil).Run(t.Context(), queue, newTestState(t))
+	if !errors.Is(err, ErrQuotaExhausted) {
+		t.Fatalf("Run err = %v, want ErrQuotaExhausted", err)
+	}
+	if api.submits != maxRateLimitedInARow {
+		t.Errorf("%d submissões, want %d — a fila inteira não devia virar erro", api.submits, maxRateLimitedInARow)
+	}
+}
+
+func TestRunRateLimitCounterResetsOnAccepted(t *testing.T) {
+	api := solvable()
+	accepted := api.submit
+	// Alterna: bloqueia, passa, bloqueia, passa… nunca chega a 3 seguidos.
+	var n int
+	api.submitFn = func() (*leetcode.CheckResult, error) {
+		if n++; n%2 == 1 {
+			return nil, fmt.Errorf("submit: %w", leetcode.ErrRateLimited)
+		}
+		return accepted, nil
+	}
+
+	cfg := testCfg()
+	cfg.Submit = true
+	queue := make([]leetcode.IndexEntry, 8)
+	for i := range queue {
+		queue[i] = leetcode.IndexEntry{Slug: fmt.Sprintf("p%d", i), FrontendID: i}
+	}
+
+	if err := New(api, cfg, nil).Run(t.Context(), queue, newTestState(t)); err != nil {
+		t.Fatalf("Run err = %v, want nil — 429 intercalado com aceite não é cota esgotada", err)
 	}
 }
 

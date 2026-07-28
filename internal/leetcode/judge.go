@@ -96,8 +96,9 @@ func (c *Client) SubmitCode(ctx context.Context, q *Question, langSlug, code str
 		"typed_code":   code,
 	}
 	path := "/problems/" + q.TitleSlug + "/submit/"
-	// No retry: a 5xx after the judge already queued the submission would
-	// register a duplicate attempt on the account.
+	// No retry budget: a 5xx after the judge already queued the submission
+	// would register a duplicate attempt on the account. A 429 is different —
+	// it is rejected before the judge sees it, so do() still waits it out.
 	if err := c.postJSONAttempts(ctx, path, problemRef(q.TitleSlug), body, &resp, 1); err != nil {
 		return nil, err
 	}

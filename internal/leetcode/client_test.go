@@ -21,6 +21,7 @@ func testClient(t *testing.T, h http.HandlerFunc) *Client {
 	c := New("sess", "tok", 0)
 	c.baseURL = srv.URL
 	c.backoff = time.Millisecond
+	c.penalty = time.Millisecond
 	return c
 }
 
@@ -52,7 +53,7 @@ func TestDoGivesUpAfterAttempts(t *testing.T) {
 	var calls atomic.Int32
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		w.WriteHeader(http.StatusTooManyRequests)
+		w.WriteHeader(http.StatusBadGateway)
 	})
 
 	if err := c.getJSON(t.Context(), "/x", "", nil); err == nil {
@@ -60,6 +61,93 @@ func TestDoGivesUpAfterAttempts(t *testing.T) {
 	}
 	if got := calls.Load(); got != defaultAttempts {
 		t.Errorf("%d chamadas, want %d", got, defaultAttempts)
+	}
+}
+
+func TestDoWaitsOutRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= rateLimitRetries {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	var cooldowns atomic.Int32
+	c.OnCooldown = func(time.Duration) { cooldowns.Add(1) }
+
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	// More 429s than the attempt budget: the wait must not consume it.
+	if err := c.getJSON(t.Context(), "/x", "", &out); err != nil {
+		t.Fatalf("getJSON: %v", err)
+	}
+	if !out.OK {
+		t.Error("resposta não foi decodificada")
+	}
+	if got := cooldowns.Load(); got != rateLimitRetries {
+		t.Errorf("%d cooldowns, want %d", got, rateLimitRetries)
+	}
+}
+
+func TestDoGivesUpAfterRateLimitRetries(t *testing.T) {
+	var calls atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	err := c.getJSON(t.Context(), "/x", "", nil)
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+	if got, want := calls.Load(), int32(rateLimitRetries+1); got != want {
+		t.Errorf("%d chamadas, want %d", got, want)
+	}
+}
+
+func TestSubmitCodeWaitsOutRateLimit(t *testing.T) {
+	var submits atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/problems/two-sum/submit/":
+			if submits.Add(1) == 1 {
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.Write([]byte(`{"submission_id":42}`))
+		default:
+			w.Write([]byte(`{"state":"SUCCESS","status_code":10,"status_msg":"Accepted"}`))
+		}
+	})
+	// Retry-After wins over c.penalty, so keep it to the shortest legal value.
+
+	q := &Question{TitleSlug: "two-sum", QuestionID: "1"}
+	res, err := c.SubmitCode(t.Context(), q, "python3", "code")
+	if err != nil {
+		t.Fatalf("SubmitCode: %v", err)
+	}
+	if !res.Accepted() {
+		t.Error("veredito não foi decodificado")
+	}
+	if got := submits.Load(); got != 2 {
+		t.Errorf("%d submissões, want 2 — o 429 é rejeitado antes do juiz, então esperar é seguro", got)
+	}
+}
+
+func TestCooldownForPrefersRetryAfter(t *testing.T) {
+	h := http.Header{"Retry-After": []string{"42"}}
+	if got := cooldownFor(h, 1, time.Minute); got != 42*time.Second {
+		t.Errorf("cooldown = %s, want 42s", got)
+	}
+	if got := cooldownFor(nil, 3, time.Second); got != 4*time.Second {
+		t.Errorf("cooldown = %s, want 4s (backoff exponencial)", got)
+	}
+	if got := cooldownFor(nil, 20, time.Second); got != maxCooldown {
+		t.Errorf("cooldown = %s, want o teto %s", got, maxCooldown)
 	}
 }
 

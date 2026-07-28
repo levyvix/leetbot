@@ -135,7 +135,11 @@ func newClient(interval time.Duration) (*leetcode.Client, error) {
 	if session == "" || csrf == "" {
 		return nil, fmt.Errorf("defina LEETCODE_SESSION e LEETCODE_CSRF (veja o README)")
 	}
-	return leetcode.New(session, csrf, interval), nil
+	c := leetcode.New(session, csrf, interval)
+	c.OnCooldown = func(d time.Duration) {
+		logf("429 do LeetCode — pausando %s antes de continuar", d.Round(time.Second))
+	}
+	return c, nil
 }
 
 func indexPath() string {
@@ -370,6 +374,9 @@ func cmdRun(ctx context.Context, args []string) error {
 	if errors.Is(runErr, context.Canceled) {
 		logf("interrompido — progresso salvo em %s", *statePath)
 		return nil
+	}
+	if errors.Is(runErr, bot.ErrQuotaExhausted) {
+		logf("progresso salvo em %s — rode o mesmo comando mais tarde para retomar", *statePath)
 	}
 	return runErr
 }

@@ -131,6 +131,25 @@ terminaram em `error`, que são retentados).
 | `-interval` | `500ms` | intervalo mínimo entre requisições HTTP |
 | `-include-solved` | `false` | não pula os já resolvidos na conta |
 
+### Rate limit (429)
+
+Quando o LeetCode responde `429 Too Many Requests`, o cliente inteiro entra em
+cooldown — respeitando o header `Retry-After` quando existe, senão 30s dobrando
+a cada 429 consecutivo, com teto de 5 min. A espera não consome o orçamento de
+retries, então o `/submit/` também é reenviado depois do cooldown (o 429 é
+recusado antes de chegar ao juiz, logo não duplica tentativa na conta).
+
+Se o 429 persistir depois de 5 esperas, o problema é abandonado com status
+`error` (será retentado numa execução futura) em vez de queimar os candidatos
+restantes. Se isso acontecer com frequência, aumente `-pause` e `-interval`.
+
+Além disso, a conta parece ter uma **cota de submissões de janela longa**: numa
+execução real o 429 começou depois de ~480 aceitos no mesmo dia, com throughput
+até então estável (~150/h), e não soltou em 10 min de tentativas. Cooldown de
+minutos não resolve isso, então após 3 problemas seguidos bloqueados o run
+encerra com `cota de submissões da conta esgotada`. O progresso está no
+`state.json`; basta repetir o mesmo comando algumas horas depois para retomar.
+
 ## Estados possíveis
 
 | Status | Significado |
