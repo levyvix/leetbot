@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -16,13 +17,30 @@ import (
 	"time"
 
 	"github.com/levyvix/leetbot/internal/bot"
+	"github.com/levyvix/leetbot/internal/dash"
 	"github.com/levyvix/leetbot/internal/leetcode"
 )
 
 const indexMaxAge = 24 * time.Hour
 
+// exitCode is an error that only carries a process exit status: the command
+// has already reported what happened on stdout.
+type exitCode int
+
+func (e exitCode) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
 func main() {
-	if err := run(); err != nil {
+	err := run()
+	switch {
+	case err == nil:
+	case errors.Is(err, flag.ErrHelp):
+		// The flag package already printed the usage.
+		os.Exit(2)
+	default:
+		var code exitCode
+		if errors.As(err, &code) {
+			os.Exit(int(code))
+		}
 		fmt.Fprintln(os.Stderr, "erro:", err)
 		os.Exit(1)
 	}
@@ -81,6 +99,12 @@ func run() error {
 	}
 }
 
+// newFlagSet returns a flag set that reports parse errors instead of calling
+// os.Exit, so every command funnels its failures through run's error return.
+func newFlagSet(name string) *flag.FlagSet {
+	return flag.NewFlagSet(name, flag.ContinueOnError)
+}
+
 // parsePositional parses a flag set that takes exactly one positional
 // argument, allowing flags on either side of it. Go's flag package stops at
 // the first non-flag argument, so this resumes parsing after it.
@@ -136,7 +160,7 @@ func cmdWhoami(ctx context.Context) error {
 }
 
 func cmdShow(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("show", flag.ExitOnError)
+	fs := newFlagSet("show")
 	raw := fs.Bool("raw", false, "imprime o HTML original em vez de texto")
 	lang := fs.String("lang", "", "também imprime o stub desta linguagem (ex: python3)")
 	ref, err := parsePositional(fs, args, "leetbot show <id|slug> [flags]")
@@ -170,16 +194,17 @@ func cmdShow(ctx context.Context, args []string) error {
 	return nil
 }
 
-// resolveQuestion accepts a frontend id or a slug.
+// resolveQuestion accepts a frontend id or a slug. Only a ref that is entirely
+// digits counts as an id — slugs such as "3sum" also start with one.
 func resolveQuestion(ctx context.Context, c *leetcode.Client, ref string) (*leetcode.Question, error) {
-	slug := ref
-	if _, err := fmt.Sscanf(ref, "%d", new(int)); err == nil {
+	slug := strings.ToLower(strings.TrimSpace(ref))
+	if _, isID := leetcode.IsID(ref); isID {
 		idx, err := c.LoadIndex(ctx, indexPath(), indexMaxAge)
 		if err != nil {
 			return nil, err
 		}
-		entry, ok := idx.Lookup(ref)
-		if !ok {
+		entry, found := idx.Lookup(ref)
+		if !found {
 			return nil, fmt.Errorf("nenhum problema com id %s", ref)
 		}
 		slug = entry.Slug
@@ -190,7 +215,7 @@ func resolveQuestion(ctx context.Context, c *leetcode.Client, ref string) (*leet
 // cmdHarvest exercises the scraping stage in isolation: it lists candidate
 // solutions without running or submitting anything.
 func cmdHarvest(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("harvest", flag.ExitOnError)
+	fs := newFlagSet("harvest")
 	lang := fs.String("lang", "python3", "slug da linguagem")
 	articles := fs.Int("articles", 5, "quantos posts de solução ler")
 	printFirst := fs.Bool("print", false, "imprime o primeiro candidato de cada post")
@@ -234,7 +259,7 @@ func cmdHarvest(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("\ntotal de candidatos: %d\n", total)
 	if total == 0 {
-		os.Exit(2)
+		return exitCode(2)
 	}
 	return nil
 }
@@ -244,7 +269,7 @@ func indent(s, prefix string) string {
 }
 
 func cmdSolve(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("solve", flag.ExitOnError)
+	fs := newFlagSet("solve")
 	cfg := bot.DefaultConfig()
 	fs.StringVar(&cfg.Lang, "lang", cfg.Lang, "slug da linguagem (python3, java, cpp, golang, ...)")
 	fs.BoolVar(&cfg.Submit, "submit", false, "submete de verdade (padrão: só testa nos exemplos)")
@@ -272,19 +297,22 @@ func cmdSolve(ctx context.Context, args []string) error {
 
 	b := bot.New(c, cfg, logf)
 	logf("%d. %s (%s)", entry.FrontendID, entry.Slug, cfg.Lang)
-	out := b.Solve(ctx, *entry)
+	out, solveErr := b.Solve(ctx, entry)
 	fmt.Printf("\n%s: %s\n", out.Status, out.Detail)
 	if *printCode && out.Code != "" {
 		fmt.Printf("\n--- código ---\n%s\n", out.Code)
 	}
+	if solveErr != nil && !errors.Is(solveErr, context.Canceled) {
+		return solveErr
+	}
 	if out.Status == bot.StatusFailed || out.Status == bot.StatusError {
-		os.Exit(2)
+		return exitCode(2)
 	}
 	return nil
 }
 
 func cmdRun(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	fs := newFlagSet("run")
 	cfg := bot.DefaultConfig()
 	fs.StringVar(&cfg.Lang, "lang", cfg.Lang, "slug da linguagem")
 	fs.BoolVar(&cfg.Submit, "submit", false, "submete de verdade (padrão: só testa nos exemplos)")
@@ -297,7 +325,9 @@ func cmdRun(ctx context.Context, args []string) error {
 	includeSolved := fs.Bool("include-solved", false, "não pula os problemas já resolvidos na conta")
 	statePath := fs.String("state", "state.json", "arquivo de progresso")
 	interval := fs.Duration("interval", 500*time.Millisecond, "intervalo mínimo entre requisições")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	c, err := newClient(*interval)
 	if err != nil {
@@ -317,18 +347,11 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 
-	var queue []leetcode.IndexEntry
-	for _, e := range idx.Entries {
-		switch {
-		case e.PaidOnly,
-			e.FrontendID < *from,
-			wantLevel != 0 && e.Difficulty != wantLevel,
-			e.Solved && !*includeSolved:
-			continue
-		}
-		queue = append(queue, e)
-	}
-	sort.Slice(queue, func(i, j int) bool { return queue[i].FrontendID < queue[j].FrontendID })
+	queue := filterQueue(idx.Entries, queueFilter{
+		minID:         *from,
+		difficulty:    wantLevel,
+		includeSolved: *includeSolved,
+	})
 	if *limit > 0 && len(queue) > *limit {
 		queue = queue[:*limit]
 	}
@@ -344,17 +367,45 @@ func cmdRun(ctx context.Context, args []string) error {
 
 	runErr := bot.New(c, cfg, logf).Run(ctx, queue, state)
 	printTally(state)
-	if runErr != nil && ctx.Err() != nil {
+	if errors.Is(runErr, context.Canceled) {
 		logf("interrompido — progresso salvo em %s", *statePath)
 		return nil
 	}
 	return runErr
 }
 
+// queueFilter selects which indexed problems are worth attempting.
+type queueFilter struct {
+	minID         int
+	difficulty    int // 0 means any
+	includeSolved bool
+}
+
+// filterQueue returns the matching entries sorted by frontend id.
+func filterQueue(entries []leetcode.IndexEntry, f queueFilter) []leetcode.IndexEntry {
+	var queue []leetcode.IndexEntry
+	for _, e := range entries {
+		if e.PaidOnly || e.FrontendID < f.minID {
+			continue
+		}
+		if f.difficulty != 0 && e.Difficulty != f.difficulty {
+			continue
+		}
+		if e.Solved && !f.includeSolved {
+			continue
+		}
+		queue = append(queue, e)
+	}
+	sort.Slice(queue, func(i, j int) bool { return queue[i].FrontendID < queue[j].FrontendID })
+	return queue
+}
+
 func cmdStats(args []string) error {
-	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+	fs := newFlagSet("stats")
 	statePath := fs.String("state", "state.json", "arquivo de progresso")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	state, err := bot.LoadState(*statePath)
 	if err != nil {
@@ -365,12 +416,14 @@ func cmdStats(args []string) error {
 }
 
 func cmdDash(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("dash", flag.ExitOnError)
+	fs := newFlagSet("dash")
 	user := fs.String("user", "", "username a consultar (padrão: a conta conectada)")
 	statePath := fs.String("state", "state.json", "arquivo de progresso do bot")
 	every := fs.Duration("every", 10*time.Second, "intervalo de atualização do painel")
 	once := fs.Bool("once", false, "imprime uma vez e sai, em vez de ficar ao vivo")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	if *every < time.Second {
 		return fmt.Errorf("-every mínimo é 1s (evita bater no rate limit)")
 	}
@@ -392,7 +445,7 @@ func cmdDash(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Print(renderDash(stats, *statePath, -1, ""))
+		fmt.Print(dash.Render(stats, -1, botLine(*statePath), ""))
 		return nil
 	}
 
@@ -413,11 +466,11 @@ func cmdDash(ctx context.Context, args []string) error {
 		footer := fmt.Sprintf("  %s  ·  atualiza a cada %s  ·  ctrl+c para sair\n",
 			time.Now().Format("15:04:05"), *every)
 		clear := ""
-		if isTerminal(os.Stdout) {
+		if dash.IsTerminal(os.Stdout) {
 			// Home + clear-below, so the frame redraws without flicker.
 			clear = "\033[H\033[J"
 		}
-		fmt.Print(clear + renderDash(stats, *statePath, baseline, footer))
+		fmt.Print(clear + dash.Render(stats, baseline, botLine(*statePath), footer))
 
 		select {
 		case <-ctx.Done():
@@ -427,83 +480,18 @@ func cmdDash(ctx context.Context, args []string) error {
 	}
 }
 
-// renderDash builds one frame. baseline is the solved count at the start of a
-// live session (-1 to omit the delta); footer is appended at the end.
-func renderDash(stats *leetcode.AccountStats, statePath string, baseline int, footer string) string {
-	var b strings.Builder
-	all, _ := stats.Bucket("All")
-
-	fmt.Fprintf(&b, "\n  %s", stats.Username)
-	if stats.Ranking > 0 {
-		fmt.Fprintf(&b, "  ·  rank #%s", thousands(stats.Ranking))
+// botLine summarises the bot's own progress for the dashboard, or "" when
+// there is no readable state file.
+func botLine(statePath string) string {
+	state, err := bot.LoadState(statePath)
+	if err != nil {
+		return ""
 	}
-	if baseline >= 0 && all.Solved > baseline {
-		fmt.Fprintf(&b, "  ·  +%d nesta sessão", all.Solved-baseline)
+	line := tallyLine(state)
+	if line == "" {
+		return ""
 	}
-	fmt.Fprintf(&b, "\n  %s\n\n", strings.Repeat("─", 46))
-
-	for _, name := range []string{"All", "Easy", "Medium", "Hard"} {
-		d, ok := stats.Bucket(name)
-		if !ok {
-			continue
-		}
-		label := name
-		if name == "All" {
-			label = "Total"
-		}
-		fmt.Fprintf(&b, "  %-7s %s %4d/%-5d %5.1f%%", label, bar(d.Solved, d.Total, 22), d.Solved, d.Total, pct(d.Solved, d.Total))
-		if d.Beats > 0 {
-			fmt.Fprintf(&b, "   beats %.1f%%", d.Beats)
-		}
-		b.WriteString("\n")
-	}
-
-	fmt.Fprintf(&b, "\n  %s\n", strings.Repeat("─", 46))
-	fmt.Fprintf(&b, "  submissões       %d aceitas / %d totais (%.1f%%)\n", all.Submissions, stats.TotalSubmissions, pct(all.Submissions, stats.TotalSubmissions))
-	fmt.Fprintf(&b, "  dias ativos      %d  ·  streak atual %d\n", stats.TotalActiveDays, stats.Streak)
-	if stats.Reputation > 0 {
-		fmt.Fprintf(&b, "  reputação        %d\n", stats.Reputation)
-	}
-	if state, err := bot.LoadState(statePath); err == nil {
-		if line := tallyLine(state); line != "" {
-			fmt.Fprintf(&b, "  bot (%s)   %s\n", statePath, line)
-		}
-	}
-	b.WriteString("\n" + footer)
-	return b.String()
-}
-
-func isTerminal(f *os.File) bool {
-	st, err := f.Stat()
-	return err == nil && st.Mode()&os.ModeCharDevice != 0
-}
-
-// bar renders a proportional progress bar of the given width.
-func bar(n, total, width int) string {
-	filled := 0
-	if total > 0 {
-		filled = n * width / total
-		if filled == 0 && n > 0 {
-			filled = 1
-		}
-	}
-	return "[" + strings.Repeat("█", filled) + strings.Repeat("·", width-filled) + "]"
-}
-
-func pct(n, total int) float64 {
-	if total == 0 {
-		return 0
-	}
-	return float64(n) * 100 / float64(total)
-}
-
-// thousands formats an int with "," separators, e.g. 5000000 -> "5,000,000".
-func thousands(n int) string {
-	s := fmt.Sprint(n)
-	for i := len(s) - 3; i > 0; i -= 3 {
-		s = s[:i] + "," + s[i:]
-	}
-	return s
+	return fmt.Sprintf("bot (%s)   %s", statePath, line)
 }
 
 func printTally(state *bot.State) {

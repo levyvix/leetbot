@@ -3,12 +3,23 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/levyvix/leetbot/internal/leetcode"
 )
+
+// API is the slice of the LeetCode client the bot depends on. Declared here so
+// the solve loop can be tested without a network.
+type API interface {
+	GetQuestion(ctx context.Context, slug string) (*leetcode.Question, error)
+	ListSolutions(ctx context.Context, slug, langSlug string, first int) ([]leetcode.SolutionArticle, error)
+	GetSolutionContent(ctx context.Context, topicID int64) (string, error)
+	RunCode(ctx context.Context, q *leetcode.Question, langSlug, code, dataInput string) (*leetcode.CheckResult, error)
+	SubmitCode(ctx context.Context, q *leetcode.Question, langSlug, code string) (*leetcode.CheckResult, error)
+}
 
 // Status is the outcome of attempting one problem.
 type Status string
@@ -54,17 +65,34 @@ func DefaultConfig() Config {
 
 // Bot solves problems using top-voted community solutions.
 type Bot struct {
-	client *leetcode.Client
+	client API
 	cfg    Config
-	Log    func(format string, args ...any)
+	log    func(format string, args ...any)
 }
 
 // New builds a Bot. log may be nil.
-func New(client *leetcode.Client, cfg Config, log func(string, ...any)) *Bot {
+func New(client API, cfg Config, log func(string, ...any)) *Bot {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
-	return &Bot{client: client, cfg: cfg, Log: log}
+	return &Bot{client: client, cfg: cfg, log: log}
+}
+
+// fatal reports whether an error makes the remaining problems pointless to try:
+// dead cookies fail every request, and a cancelled context is the user asking
+// to stop.
+func fatal(err error) bool {
+	return errors.Is(err, leetcode.ErrUnauthorized) || errors.Is(err, context.Canceled)
+}
+
+// errored records err on the outcome, and returns it as a run-level error only
+// when continuing to the next problem would be futile.
+func errored(out Outcome, err error) (Outcome, error) {
+	out.Status, out.Detail = StatusError, err.Error()
+	if fatal(err) {
+		return out, err
+	}
+	return out, nil
 }
 
 // unsupportedTags are problem categories whose submission flow differs enough
@@ -75,48 +103,48 @@ var unsupportedTags = map[string]bool{
 	"concurrency": true,
 }
 
-// Solve attempts a single problem.
-func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) Outcome {
+// Solve attempts a single problem. The returned error is non-nil only when the
+// failure also dooms every remaining problem (see fatal); ordinary failures are
+// reported through the Outcome.
+func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) (Outcome, error) {
 	out := Outcome{Slug: entry.Slug, FrontendID: entry.FrontendID, At: time.Now()}
 
 	if entry.PaidOnly {
 		out.Status, out.Detail = StatusSkipped, "premium-only"
-		return out
+		return out, nil
 	}
 
 	q, err := b.client.GetQuestion(ctx, entry.Slug)
 	if err != nil {
-		out.Status, out.Detail = StatusError, err.Error()
-		return out
+		return errored(out, err)
 	}
 	for _, t := range q.TopicTags {
 		if unsupportedTags[t.Slug] {
 			out.Status, out.Detail = StatusSkipped, "categoria não suportada: "+t.Slug
-			return out
+			return out, nil
 		}
 	}
 	entryPoint := q.EntryPoint()
 	if entryPoint == "" {
 		out.Status, out.Detail = StatusSkipped, "sem entry point no metaData"
-		return out
+		return out, nil
 	}
 	if _, ok := q.Snippet(b.cfg.Lang); !ok {
 		out.Status, out.Detail = StatusSkipped, "sem stub para "+b.cfg.Lang
-		return out
+		return out, nil
 	}
 	if strings.TrimSpace(q.ExampleTestcases) == "" {
 		out.Status, out.Detail = StatusSkipped, "sem casos de exemplo"
-		return out
+		return out, nil
 	}
 
 	articles, err := b.client.ListSolutions(ctx, entry.Slug, b.cfg.Lang, b.cfg.MaxArticles)
 	if err != nil {
-		out.Status, out.Detail = StatusError, err.Error()
-		return out
+		return errored(out, err)
 	}
 	if len(articles) == 0 {
 		out.Status, out.Detail = StatusFailed, "nenhuma solução da comunidade em "+b.cfg.Lang
-		return out
+		return out, nil
 	}
 
 	tried := 0
@@ -128,6 +156,9 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) Outcome {
 		}
 		md, err := b.client.GetSolutionContent(ctx, art.TopicID)
 		if err != nil {
+			if fatal(err) {
+				return errored(out, err)
+			}
 			lastDetail = err.Error()
 			continue
 		}
@@ -137,26 +168,32 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) Outcome {
 			}
 			tried++
 			out.Attempts = tried
-			b.Log("  [%d/%d] testando candidato de %q", tried, b.cfg.MaxCandidates, truncate(art.Title, 48))
+			b.log("  [%d/%d] testando candidato de %q", tried, b.cfg.MaxCandidates, truncate(art.Title, 48))
 
 			run, err := b.client.RunCode(ctx, q, b.cfg.Lang, code, q.ExampleTestcases)
 			if err != nil {
+				if fatal(err) {
+					return errored(out, err)
+				}
 				lastDetail = err.Error()
 				continue
 			}
 			if !run.RunSuccess || !run.CorrectAnswer {
 				lastDetail = "exemplos: " + run.Error()
-				b.Log("      reprovado nos exemplos: %s", truncate(run.Error(), 90))
+				b.log("      reprovado nos exemplos: %s", truncate(run.Error(), 90))
 				continue
 			}
 
 			if !b.cfg.Submit {
 				out.Status, out.Detail, out.Code = StatusTested, "passou nos exemplos (dry-run)", code
-				return out
+				return out, nil
 			}
 
 			sub, err := b.client.SubmitCode(ctx, q, b.cfg.Lang, code)
 			if err != nil {
+				if fatal(err) {
+					return errored(out, err)
+				}
 				lastDetail = err.Error()
 				continue
 			}
@@ -164,10 +201,10 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) Outcome {
 				out.Status = StatusAccepted
 				out.Detail = fmt.Sprintf("%s | %s | %s", sub.StatusMsg, sub.StatusRuntime, sub.StatusMemory)
 				out.Code = code
-				return out
+				return out, nil
 			}
 			lastDetail = fmt.Sprintf("submissão: %s (%d/%d)", sub.StatusMsg, sub.TotalCorrect, sub.TotalTestcases)
-			b.Log("      submissão rejeitada: %s", truncate(lastDetail, 90))
+			b.log("      submissão rejeitada: %s", truncate(lastDetail, 90))
 		}
 	}
 
@@ -176,7 +213,7 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) Outcome {
 		lastDetail = "nenhum bloco de código utilizável encontrado"
 	}
 	out.Detail = lastDetail
-	return out
+	return out, nil
 }
 
 // Run solves every entry in order, persisting progress after each one.
@@ -186,17 +223,20 @@ func (b *Bot) Run(ctx context.Context, entries []leetcode.IndexEntry, state *Sta
 			return err
 		}
 		if prev, ok := state.Get(e.Slug); ok && prev.Status != StatusError {
-			b.Log("[%d/%d] %d. %s — já processado (%s)", i+1, len(entries), e.FrontendID, e.Slug, prev.Status)
+			b.log("[%d/%d] %d. %s — já processado (%s)", i+1, len(entries), e.FrontendID, e.Slug, prev.Status)
 			continue
 		}
 
-		b.Log("[%d/%d] %d. %s", i+1, len(entries), e.FrontendID, e.Slug)
-		out := b.Solve(ctx, e)
-		b.Log("  -> %s: %s", out.Status, truncate(out.Detail, 110))
+		b.log("[%d/%d] %d. %s", i+1, len(entries), e.FrontendID, e.Slug)
+		out, solveErr := b.Solve(ctx, e)
+		b.log("  -> %s: %s", out.Status, truncate(out.Detail, 110))
 
 		state.Put(out)
 		if err := state.Save(); err != nil {
 			return fmt.Errorf("salvando estado: %w", err)
+		}
+		if solveErr != nil {
+			return solveErr
 		}
 
 		if i < len(entries)-1 && b.cfg.PauseBetween > 0 {

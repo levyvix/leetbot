@@ -120,6 +120,8 @@ func TestPlainContent(t *testing.T) {
 func TestIndexLookup(t *testing.T) {
 	idx := &Index{Entries: []IndexEntry{
 		{FrontendID: 1, Slug: "two-sum"},
+		{FrontendID: 3, Slug: "longest-substring-without-repeating-characters"},
+		{FrontendID: 15, Slug: "3sum"},
 		{FrontendID: 42, Slug: "trapping-rain-water"},
 	}}
 
@@ -129,8 +131,30 @@ func TestIndexLookup(t *testing.T) {
 	if e, ok := idx.Lookup("Two-Sum"); !ok || e.FrontendID != 1 {
 		t.Errorf("Lookup por slug (case-insensitive) falhou: %+v %t", e, ok)
 	}
+	// "3sum" é slug, não o id 3.
+	if e, ok := idx.Lookup("3sum"); !ok || e.FrontendID != 15 {
+		t.Errorf("Lookup(%q) = %+v %t, want o problema 15", "3sum", e, ok)
+	}
 	if _, ok := idx.Lookup("9999"); ok {
 		t.Error("Lookup deveria falhar para id inexistente")
+	}
+}
+
+func TestIsID(t *testing.T) {
+	for _, tc := range []struct {
+		ref  string
+		want bool
+	}{
+		{"1", true},
+		{" 42 ", true},
+		{"3sum", false},
+		{"1abc", false},
+		{"two-sum", false},
+		{"", false},
+	} {
+		if _, got := IsID(tc.ref); got != tc.want {
+			t.Errorf("IsID(%q) = %t, want %t", tc.ref, got, tc.want)
+		}
 	}
 }
 
