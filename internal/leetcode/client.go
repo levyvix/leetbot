@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ const (
 // batch should stop instead of retrying the next item.
 var ErrUnauthorized = errors.New("sessão inválida ou expirada — renove os cookies")
 
+// ErrRateLimited reports that LeetCode answered 429 even after the client
+// waited out its cooldowns.
+var ErrRateLimited = errors.New("limite de requisições do LeetCode atingido")
+
 // Client talks to leetcode.com using the browser session cookies.
 type Client struct {
 	http     *http.Client
@@ -33,9 +38,15 @@ type Client struct {
 	csrf     string
 	interval time.Duration
 	backoff  time.Duration // unit of the exponential retry delay
+	penalty  time.Duration // unit of the cooldown applied after a 429
 
-	mu   sync.Mutex
-	last time.Time
+	// OnCooldown, when set, is called before the client pauses because of a
+	// 429. Useful for telling the user why a long run went quiet.
+	OnCooldown func(d time.Duration)
+
+	mu        sync.Mutex
+	last      time.Time
+	rateUntil time.Time
 }
 
 // New builds a client. session and csrf come from the browser cookies
@@ -58,15 +69,20 @@ func New(session, csrf string, interval time.Duration) *Client {
 		csrf:     csrf,
 		interval: interval,
 		backoff:  time.Second,
+		penalty:  30 * time.Second,
 	}
 }
 
-// throttle blocks until at least interval has passed since the last request,
-// or until ctx is cancelled.
+// throttle blocks until at least interval has passed since the last request and
+// any rate-limit cooldown has expired, or until ctx is cancelled.
 func (c *Client) throttle(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if wait := c.interval - time.Since(c.last); wait > 0 {
+	wait := c.interval - time.Since(c.last)
+	if d := time.Until(c.rateUntil); d > wait {
+		wait = d
+	}
+	if wait > 0 {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -75,6 +91,20 @@ func (c *Client) throttle(ctx context.Context) error {
 	}
 	c.last = time.Now()
 	return nil
+}
+
+// cooldown holds back every subsequent request for d. A 429 is account-wide, so
+// pausing the whole client is what actually helps — retrying just this one call
+// while the rest of the run keeps firing only digs the hole deeper.
+func (c *Client) cooldown(d time.Duration) {
+	if c.OnCooldown != nil {
+		c.OnCooldown(d)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if until := time.Now().Add(d); until.After(c.rateUntil) {
+		c.rateUntil = until
+	}
 }
 
 func (c *Client) newRequest(ctx context.Context, method, path, referer string, body []byte) (*http.Request, error) {
@@ -106,12 +136,21 @@ func (c *Client) newRequest(ctx context.Context, method, path, referer string, b
 // giving up. Non-idempotent endpoints must pass 1.
 const defaultAttempts = 3
 
-// do sends the request up to attempts times, retrying on 429 and 5xx, and
-// decodes JSON into out.
+// rateLimitRetries is how many 429s a single request waits out. This budget is
+// separate from attempts: a 429 means the server rejected the request before
+// acting on it, so waiting and retrying is safe even for /submit/.
+const rateLimitRetries = 5
+
+// maxCooldown caps how long a single 429 can pause the client.
+const maxCooldown = 5 * time.Minute
+
+// do sends the request up to attempts times, retrying on 5xx, waiting out 429s,
+// and decodes JSON into out.
 func (c *Client) do(ctx context.Context, method, path, referer string, body []byte, out any, attempts int) error {
 	var lastErr error
+	attempt, rateHits := 0, 0
 
-	for attempt := range attempts {
+	for attempt < attempts {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -133,18 +172,31 @@ func (c *Client) do(ctx context.Context, method, path, referer string, body []by
 				return ctx.Err()
 			}
 			lastErr = fmt.Errorf("%s %s: %w", method, path, err)
+			attempt++
 			continue
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 		resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("%s %s: lendo resposta: %w", method, path, err)
+			attempt++
 			continue
 		}
 
 		switch {
-		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		case resp.StatusCode == http.StatusTooManyRequests:
+			lastErr = fmt.Errorf("%s %s: %s: %w", method, path, resp.Status, ErrRateLimited)
+			if rateHits >= rateLimitRetries {
+				return lastErr
+			}
+			rateHits++
+			// Does not consume the attempt budget: the request never reached
+			// the judge, so this is a wait, not a retry of a possible action.
+			c.cooldown(cooldownFor(resp.Header, rateHits, c.penalty))
+			continue
+		case resp.StatusCode >= 500:
 			lastErr = fmt.Errorf("%s %s: %s", method, path, resp.Status)
+			attempt++
 			continue
 		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
 			return fmt.Errorf("%s %s: %s: %w", method, path, resp.Status, ErrUnauthorized)
@@ -232,6 +284,22 @@ func (c *Client) Whoami(ctx context.Context) (*UserStatus, error) {
 		return nil, fmt.Errorf("não autenticado: %w", ErrUnauthorized)
 	}
 	return &data.UserStatus, nil
+}
+
+// cooldownFor decides how long to pause after a 429: the server's Retry-After
+// when it sends one, otherwise unit doubled per consecutive hit.
+func cooldownFor(h http.Header, hits int, unit time.Duration) time.Duration {
+	if v := h.Get("Retry-After"); v != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs > 0 {
+			return min(time.Duration(secs)*time.Second, maxCooldown)
+		}
+		if t, err := http.ParseTime(v); err == nil {
+			if d := time.Until(t); d > 0 {
+				return min(d, maxCooldown)
+			}
+		}
+	}
+	return min(time.Duration(1<<(hits-1))*unit, maxCooldown)
 }
 
 func truncate(s string, n int) string {

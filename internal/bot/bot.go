@@ -85,11 +85,19 @@ func fatal(err error) bool {
 	return errors.Is(err, leetcode.ErrUnauthorized) || errors.Is(err, context.Canceled)
 }
 
+// abandon reports whether err dooms the rest of *this* problem. On top of the
+// fatal errors, a rate limit that outlived the client's cooldowns will hit the
+// next candidate just the same.
+func abandon(err error) bool {
+	return fatal(err) || errors.Is(err, leetcode.ErrRateLimited)
+}
+
 // errored records err on the outcome, and returns it as a run-level error only
-// when continuing to the next problem would be futile.
+// when continuing to the next problem would be futile. Run decides what to do
+// with a rate limit; it is not fatal on its own.
 func errored(out Outcome, err error) (Outcome, error) {
 	out.Status, out.Detail = StatusError, err.Error()
-	if fatal(err) {
+	if abandon(err) {
 		return out, err
 	}
 	return out, nil
@@ -156,7 +164,7 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) (Outcome, er
 		}
 		md, err := b.client.GetSolutionContent(ctx, art.TopicID)
 		if err != nil {
-			if fatal(err) {
+			if abandon(err) {
 				return errored(out, err)
 			}
 			lastDetail = err.Error()
@@ -172,7 +180,7 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) (Outcome, er
 
 			run, err := b.client.RunCode(ctx, q, b.cfg.Lang, code, q.ExampleTestcases)
 			if err != nil {
-				if fatal(err) {
+				if abandon(err) {
 					return errored(out, err)
 				}
 				lastDetail = err.Error()
@@ -191,7 +199,7 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) (Outcome, er
 
 			sub, err := b.client.SubmitCode(ctx, q, b.cfg.Lang, code)
 			if err != nil {
-				if fatal(err) {
+				if abandon(err) {
 					return errored(out, err)
 				}
 				lastDetail = err.Error()
@@ -216,8 +224,21 @@ func (b *Bot) Solve(ctx context.Context, entry leetcode.IndexEntry) (Outcome, er
 	return out, nil
 }
 
+// ErrQuotaExhausted reports that the account stopped accepting work. Observed
+// in practice after a few hundred submissions in a day: the 429s become
+// continuous and do not clear within minutes, so the run has to end and be
+// resumed hours later.
+var ErrQuotaExhausted = errors.New("cota de submissões da conta esgotada — retome daqui a algumas horas")
+
+// maxRateLimitedInARow is how many consecutive problems may die of a rate limit
+// before Run gives up. The client already waited out several cooldowns for each
+// one; more attempts would only turn the rest of the queue into error entries.
+const maxRateLimitedInARow = 3
+
 // Run solves every entry in order, persisting progress after each one.
 func (b *Bot) Run(ctx context.Context, entries []leetcode.IndexEntry, state *State) error {
+	rateLimited := 0
+
 	for i, e := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -235,8 +256,18 @@ func (b *Bot) Run(ctx context.Context, entries []leetcode.IndexEntry, state *Sta
 		if err := state.Save(); err != nil {
 			return fmt.Errorf("salvando estado: %w", err)
 		}
-		if solveErr != nil {
+
+		switch {
+		case solveErr != nil && errors.Is(solveErr, leetcode.ErrRateLimited):
+			rateLimited++
+			if rateLimited >= maxRateLimitedInARow {
+				return fmt.Errorf("%d problemas seguidos bloqueados: %w", rateLimited, ErrQuotaExhausted)
+			}
+		case solveErr != nil:
 			return solveErr
+		case out.Status == StatusAccepted:
+			// Only a submission that got through proves the quota is back.
+			rateLimited = 0
 		}
 
 		if i < len(entries)-1 && b.cfg.PauseBetween > 0 {
