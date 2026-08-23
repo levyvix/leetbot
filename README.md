@@ -2,22 +2,12 @@
 
 [Português](README.md) | [English](README.en.md)
 
+![Perfil LeetCode](docs/leetcode-profile.png)
+
 Bot de LeetCode em Go, sem dependências externas. Replica a arquitetura descrita
 em [*Solving 1,782 Leetcode questions in one day*](https://matthewtrent.me/articles/leetcode-bot):
 em vez de gerar código com LLM, ele **colhe as soluções mais votadas da própria
 comunidade**, valida contra os casos de exemplo e só então submete.
-
-```
-índice de problemas  ->  descrição + stub  ->  soluções mais votadas
-                                                      |
-                                          extrai blocos de código
-                                                      |
-                              interpret_solution (casos de exemplo)  --falhou--> próximo candidato
-                                                      | passou
-                                                   submit
-                                                      |
-                                    poll /submissions/detail/{id}/check/
-```
 
 Validar nos exemplos antes de submeter é o que faz a diferença: o autor do
 artigo original relata que isso levou a taxa de acerto de <50% para ~95%.
@@ -31,41 +21,9 @@ conta secundária.
 
 ## Instalação
 
-### Usuário (repositório público)
-
-Requer [Go 1.26+](https://go.dev/dl/). Instale a versão publicada diretamente
-do módulo, sem clonar este repositório:
-
 ```bash
 go install github.com/levyvix/leetbot@latest
 ```
-
-O Go instala o executável no diretório configurado por `GOBIN` ou, por padrão,
-em `$(go env GOPATH)/bin`. Esse diretório precisa estar no `PATH`. Por exemplo,
-no Linux/macOS:
-
-```bash
-export PATH="$(go env GOPATH)/bin:$PATH"
-leetbot --help
-```
-
-Para atualizar uma instalação existente, execute o mesmo comando novamente.
-
-Esse comando exige que `github.com/levyvix/leetbot` seja público. Se o
-repositório continuar privado, usuários externos não conseguirão instalar o
-bot dessa forma; publique o repositório ou disponibilize binários na página de
-Releases antes de distribuir estas instruções.
-
-### Contribuidor
-
-Para compilar a partir de um checkout local:
-
-```bash
-go build -o leetbot .
-```
-
-Depois, use `./leetbot` nos comandos abaixo. A instalação via `go install` não
-tem dependências de terceiros.
 
 ## Autenticação
 
@@ -86,12 +44,6 @@ leetbot whoami
 
 O `LEETCODE_SESSION` é um JWT com validade de ~2 semanas — quando `whoami`
 retornar erro de sessão, repita o passo acima.
-
-## Prova de uso
-
-Exemplo do perfil LeetCode usado durante o desenvolvimento:
-
-![Perfil LeetCode](docs/leetcode-profile.png)
 
 ## Uso
 
@@ -201,38 +153,3 @@ encerra com `cota de submissões da conta esgotada`. O progresso está no
 | `failed` | nenhum candidato funcionou |
 | `skipped` | premium, SQL/shell/concurrency, sem stub na linguagem |
 | `error` | falha de rede ou de API — será retentado |
-
-## A API por baixo
-
-Tudo indocumentado e sujeito a mudança sem aviso.
-
-| Operação | Endpoint |
-| --- | --- |
-| Índice de problemas | `GET /api/problems/all/` |
-| Descrição | `POST /graphql` — `questionData(titleSlug)` |
-| Soluções da comunidade | `POST /graphql` — `ugcArticleSolutionArticles(questionSlug, orderBy: MOST_VOTES)` |
-| Conteúdo de uma solução | `POST /graphql` — `ugcArticleSolutionArticle(topicId)` |
-| Rodar (sem submeter) | `POST /problems/{slug}/interpret_solution/` |
-| Submeter | `POST /problems/{slug}/submit/` |
-| Verificar resultado | `GET /submissions/detail/{id}/check/` |
-
-Os endpoints REST exigem `Referer: https://leetcode.com/problems/{slug}/` e o
-header `x-csrftoken`; sem eles a resposta é 403.
-
-Note a distinção de IDs: `frontend_question_id` é o número da UI e é o que você
-passa na CLI; `question_id` é o ID interno exigido no corpo do `submit`. O
-índice em `~/.cache/leetbot/problems.json` mapeia um no outro.
-
-## Limitações conhecidas
-
-- Problemas de SQL, shell e concurrency são pulados (fluxo de julgamento
-  diferente).
-- Problemas premium são pulados — sem assinatura a descrição vem vazia.
-- Um problema sem solução da comunidade na linguagem escolhida vira `failed`.
-  Tente outra linguagem (`python3` e `java` têm a maior cobertura).
-- A extração pega blocos de código markdown que contenham o nome do método do
-  `metaData`. Posts que descrevem a solução em prosa, ou que postam só um
-  fragmento, são descartados na etapa de teste.
-- O corpo dos posts vem em duas codificações diferentes: uns com quebras de
-  linha reais, outros com `\n` literais (escape duplo). O extrator normaliza os
-  dois — veja `unescapeContent`.

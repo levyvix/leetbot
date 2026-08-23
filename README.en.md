@@ -2,20 +2,10 @@
 
 [Português](README.md) | [English](README.en.md)
 
+![LeetCode profile](docs/leetcode-profile.png)
+
 LeetCode bot written in Go, with no external dependencies. It follows the
 architecture described in [*Solving 1,782 Leetcode questions in one day*](https://matthewtrent.me/articles/leetcode-bot): instead of generating code with an LLM, it **collects the community's most-voted solutions**, validates them against the example cases, and only then submits them.
-
-```
-problem index -> description + stub -> top-voted solutions
-                                             |
-                                  extracts code blocks
-                                             |
-                       interpret_solution (examples) --failed--> next candidate
-                                             | passed
-                                           submit
-                                             |
-                              poll /submissions/detail/{id}/check/
-```
 
 Validating examples before submitting is what makes the difference: the
 original article's author reports that this increased the success rate from
@@ -29,37 +19,9 @@ the bot only runs against the example cases. Consider using a secondary account.
 
 ## Installation
 
-### User (public repository)
-
-Requires [Go 1.26+](https://go.dev/dl/). Install the module directly, without
-cloning this repository:
-
 ```bash
 go install github.com/levyvix/leetbot@latest
 ```
-
-Go installs the executable in `GOBIN` or, by default, in `$(go env GOPATH)/bin`.
-That directory must be in your `PATH`. On Linux/macOS, for example:
-
-```bash
-export PATH="$(go env GOPATH)/bin:$PATH"
-leetbot --help
-```
-
-Run the same command again to update an existing installation.
-
-This command requires `github.com/levyvix/leetbot` to be public.
-
-### Contributor
-
-To build from a local checkout:
-
-```bash
-go build -o leetbot .
-```
-
-Then use `./leetbot` in the commands below. The `go install` workflow has no
-third-party dependencies.
 
 ## Authentication
 
@@ -80,12 +42,6 @@ leetbot whoami
 
 `LEETCODE_SESSION` is a JWT valid for about two weeks. When `whoami` reports a
 session error, repeat the steps above.
-
-## Usage proof
-
-Example of the LeetCode profile used during development:
-
-![LeetCode profile](docs/leetcode-profile.png)
 
 ## Usage
 
@@ -167,30 +123,3 @@ leetbot stats
 | `failed` | no candidate worked |
 | `skipped` | premium, SQL/shell/concurrency, or no stub in the selected language |
 | `error` | network or API failure; will be retried |
-
-## Known limitations
-
-- SQL, shell, and concurrency problems are skipped.
-- Premium problems are skipped; without a subscription their descriptions are empty.
-- A problem without a community solution in the selected language becomes `failed`.
-  Try another language (`python3` and `java` have the broadest coverage).
-- Extraction keeps Markdown code blocks containing the method name from the
-  `metaData`. Prose-only posts and partial snippets are discarded during testing.
-- Article bodies use two different encodings; the extractor normalizes both.
-
-## Underlying API
-
-Everything is undocumented and subject to change without notice.
-
-| Operation | Endpoint |
-| --- | --- |
-| Problem index | `GET /api/problems/all/` |
-| Description | `POST /graphql` — `questionData(titleSlug)` |
-| Community solutions | `POST /graphql` — `ugcArticleSolutionArticles(questionSlug, orderBy: MOST_VOTES)` |
-| Solution content | `POST /graphql` — `ugcArticleSolutionArticle(topicId)` |
-| Run without submitting | `POST /problems/{slug}/interpret_solution/` |
-| Submit | `POST /problems/{slug}/submit/` |
-| Check result | `GET /submissions/detail/{id}/check/` |
-
-REST endpoints require `Referer: https://leetcode.com/problems/{slug}/` and the
-`x-csrftoken` header; without them the response is 403.
