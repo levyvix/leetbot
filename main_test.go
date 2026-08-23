@@ -64,6 +64,22 @@ func TestFilterQueue(t *testing.T) {
 	}
 }
 
+func TestFilterFailedQueue(t *testing.T) {
+	state := &bot.State{Outcomes: map[string]bot.Outcome{}}
+	state.Put(bot.Outcome{Slug: "failed", Status: bot.StatusFailed})
+	state.Put(bot.Outcome{Slug: "accepted", Status: bot.StatusAccepted})
+
+	entries := []leetcode.IndexEntry{
+		{Slug: "accepted"},
+		{Slug: "failed"},
+		{Slug: "unprocessed"},
+	}
+	got := filterFailedQueue(entries, state)
+	if want := []string{"failed"}; !slugsEqual(got, want) {
+		t.Errorf("failed queue = %v, want %v", slugs(got), want)
+	}
+}
+
 func TestTallyLine(t *testing.T) {
 	state := &bot.State{Outcomes: map[string]bot.Outcome{}}
 	if got := tallyLine(state); got != "" {

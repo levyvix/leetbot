@@ -47,6 +47,7 @@ type Outcome struct {
 type Config struct {
 	Lang          string        // LeetCode language slug, e.g. "python3"
 	Submit        bool          // when false, stop after the example tests pass
+	RetryFailed   bool          // when true, Run retries outcomes with status failed
 	MaxArticles   int           // how many top-voted solution posts to read
 	MaxCandidates int           // how many code blocks to actually test
 	PauseBetween  time.Duration // delay between problems
@@ -243,7 +244,7 @@ func (b *Bot) Run(ctx context.Context, entries []leetcode.IndexEntry, state *Sta
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if prev, ok := state.Get(e.Slug); ok && prev.Status != StatusError {
+		if prev, ok := state.Get(e.Slug); ok && prev.Status != StatusError && !(b.cfg.RetryFailed && prev.Status == StatusFailed) {
 			b.log("[%d/%d] %d. %s — já processado (%s)", i+1, len(entries), e.FrontendID, e.Slug, prev.Status)
 			continue
 		}
