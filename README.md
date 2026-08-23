@@ -1,5 +1,7 @@
 # leetbot
 
+[Português](README.md) | [English](README.en.md)
+
 Bot de LeetCode em Go, sem dependências externas. Replica a arquitetura descrita
 em [*Solving 1,782 Leetcode questions in one day*](https://matthewtrent.me/articles/leetcode-bot):
 em vez de gerar código com LLM, ele **colhe as soluções mais votadas da própria
