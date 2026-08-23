@@ -327,11 +327,13 @@ func cmdRun(ctx context.Context, args []string) error {
 	limit := fs.Int("limit", 10, "número máximo de problemas nesta execução (0 = todos)")
 	from := fs.Int("from", 0, "processa apenas problemas com id >= este valor")
 	includeSolved := fs.Bool("include-solved", false, "não pula os problemas já resolvidos na conta")
+	retryFailed := fs.Bool("retry-failed", false, "retenta apenas problemas salvos como failed")
 	statePath := fs.String("state", "state.json", "arquivo de progresso")
 	interval := fs.Duration("interval", 500*time.Millisecond, "intervalo mínimo entre requisições")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	cfg.RetryFailed = *retryFailed
 
 	c, err := newClient(*interval)
 	if err != nil {
@@ -356,6 +358,9 @@ func cmdRun(ctx context.Context, args []string) error {
 		difficulty:    wantLevel,
 		includeSolved: *includeSolved,
 	})
+	if *retryFailed {
+		queue = filterFailedQueue(queue, state)
+	}
 	if *limit > 0 && len(queue) > *limit {
 		queue = queue[:*limit]
 	}
@@ -404,6 +409,17 @@ func filterQueue(entries []leetcode.IndexEntry, f queueFilter) []leetcode.IndexE
 		queue = append(queue, e)
 	}
 	sort.Slice(queue, func(i, j int) bool { return queue[i].FrontendID < queue[j].FrontendID })
+	return queue
+}
+
+// filterFailedQueue keeps only indexed problems whose saved bot outcome is failed.
+func filterFailedQueue(entries []leetcode.IndexEntry, state *bot.State) []leetcode.IndexEntry {
+	queue := make([]leetcode.IndexEntry, 0, len(entries))
+	for _, e := range entries {
+		if outcome, ok := state.Get(e.Slug); ok && outcome.Status == bot.StatusFailed {
+			queue = append(queue, e)
+		}
+	}
 	return queue
 }
 

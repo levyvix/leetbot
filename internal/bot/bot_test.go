@@ -263,6 +263,27 @@ func TestRunSkipsAlreadyProcessed(t *testing.T) {
 	}
 }
 
+func TestRunRetriesFailedWhenConfigured(t *testing.T) {
+	api := solvable()
+	state := newTestState(t)
+	state.Put(Outcome{Slug: "failed", Status: StatusFailed})
+	state.Put(Outcome{Slug: "tested", Status: StatusTested})
+
+	cfg := testCfg()
+	cfg.RetryFailed = true
+	if err := New(api, cfg, nil).Run(t.Context(), []leetcode.IndexEntry{
+		{Slug: "failed"}, {Slug: "tested"},
+	}, state); err != nil {
+		t.Fatal(err)
+	}
+	if api.runs != 1 {
+		t.Errorf("runs = %d, want 1 (only failed outcome is retried)", api.runs)
+	}
+	if out, _ := state.Get("failed"); out.Status != StatusTested {
+		t.Errorf("failed outcome was not retried: %+v", out)
+	}
+}
+
 func TestRunStopsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
