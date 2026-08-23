@@ -1,5 +1,7 @@
 # leetbot
 
+[Português](README.md) | [English](README.en.md)
+
 Bot de LeetCode em Go, sem dependências externas. Replica a arquitetura descrita
 em [*Solving 1,782 Leetcode questions in one day*](https://matthewtrent.me/articles/leetcode-bot):
 em vez de gerar código com LLM, ele **colhe as soluções mais votadas da própria
@@ -29,11 +31,41 @@ conta secundária.
 
 ## Instalação
 
+### Usuário (repositório público)
+
+Requer [Go 1.26+](https://go.dev/dl/). Instale a versão publicada diretamente
+do módulo, sem clonar este repositório:
+
+```bash
+go install github.com/levyvix/leetbot@latest
+```
+
+O Go instala o executável no diretório configurado por `GOBIN` ou, por padrão,
+em `$(go env GOPATH)/bin`. Esse diretório precisa estar no `PATH`. Por exemplo,
+no Linux/macOS:
+
+```bash
+export PATH="$(go env GOPATH)/bin:$PATH"
+leetbot --help
+```
+
+Para atualizar uma instalação existente, execute o mesmo comando novamente.
+
+Esse comando exige que `github.com/levyvix/leetbot` seja público. Se o
+repositório continuar privado, usuários externos não conseguirão instalar o
+bot dessa forma; publique o repositório ou disponibilize binários na página de
+Releases antes de distribuir estas instruções.
+
+### Contribuidor
+
+Para compilar a partir de um checkout local:
+
 ```bash
 go build -o leetbot .
 ```
 
-Requer Go 1.26+. Nenhuma dependência de terceiros.
+Depois, use `./leetbot` nos comandos abaixo. A instalação via `go install` não
+tem dependências de terceiros.
 
 ## Autenticação
 
@@ -48,12 +80,18 @@ navegador já logado:
 export LEETCODE_SESSION='eyJ...'
 export LEETCODE_CSRF='abc...'
 
-./leetbot whoami
+leetbot whoami
 # autenticado como levy_vix (premium: false)
 ```
 
 O `LEETCODE_SESSION` é um JWT com validade de ~2 semanas — quando `whoami`
 retornar erro de sessão, repita o passo acima.
+
+## Prova de uso
+
+Exemplo do perfil LeetCode usado durante o desenvolvimento:
+
+![Perfil LeetCode](docs/leetcode-profile.png)
 
 ## Uso
 
@@ -62,8 +100,8 @@ retornar erro de sessão, repita o passo acima.
 Aceita o ID que aparece na UI ou o slug:
 
 ```bash
-./leetbot show 1
-./leetbot show two-sum -lang python3
+leetbot show 1
+leetbot show two-sum -lang python3
 ```
 
 ### Inspecionar as soluções candidatas
@@ -72,7 +110,7 @@ Roda só a etapa de colheita — não executa nem submete nada. Útil para depur
 extração antes de gastar submissões:
 
 ```bash
-./leetbot harvest two-sum -lang python3
+leetbot harvest two-sum -lang python3
 # 1. Two Sum | entry point: twoSum | 5 posts em python3
 #
 #   3 candidato(s) — ✅3 Method's || C++ || JAVA || PYTHON || Beginner Friendly🔥
@@ -81,30 +119,33 @@ extração antes de gastar submissões:
 #   ...
 # total de candidatos: 12
 
-./leetbot harvest two-sum -lang python3 -articles 1 -print   # mostra o código
+leetbot harvest two-sum -lang python3 -articles 1 -print   # mostra o código
 ```
 
 ### Resolver um problema
 
 ```bash
 # dry-run: colhe soluções e testa nos exemplos, não submete
-./leetbot solve 1 -lang python3 -print
+leetbot solve 1 -lang python3 -print
 
 # submete de verdade
-./leetbot solve 1 -lang python3 -submit
+leetbot solve 1 -lang python3 -submit
 ```
 
 ### Rodar em lote
 
 ```bash
 # 20 problemas fáceis, dry-run
-./leetbot run -difficulty easy -limit 20
+leetbot run -difficulty easy -limit 20
 
 # submetendo, devagar
-./leetbot run -difficulty easy -limit 50 -submit -pause 10s
+leetbot run -difficulty easy -limit 50 -submit -pause 10s
 
 # retomar de onde parou (o estado é lido do mesmo arquivo)
-./leetbot run -difficulty easy -limit 200 -submit
+leetbot run -difficulty easy -limit 200 -submit
+
+# retentar somente os problemas que terminaram como failed
+leetbot run -retry-failed -limit 0 -submit
 ```
 
 O progresso vai para `state.json` após **cada** problema, então `Ctrl-C` é
@@ -112,7 +153,7 @@ seguro e a próxima execução pula o que já foi processado (exceto os que
 terminaram em `error`, que são retentados).
 
 ```bash
-./leetbot stats
+leetbot stats
 # total=20 accepted=17 failed=2 skipped=1
 ```
 
@@ -130,6 +171,7 @@ terminaram em `error`, que são retentados).
 | `-pause` | `5s` | pausa entre problemas |
 | `-interval` | `500ms` | intervalo mínimo entre requisições HTTP |
 | `-include-solved` | `false` | não pula os já resolvidos na conta |
+| `-retry-failed` | `false` | retenta somente problemas salvos como `failed` |
 
 ### Rate limit (429)
 
