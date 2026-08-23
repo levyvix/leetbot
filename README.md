@@ -87,6 +87,12 @@ leetbot whoami
 O `LEETCODE_SESSION` é um JWT com validade de ~2 semanas — quando `whoami`
 retornar erro de sessão, repita o passo acima.
 
+## Prova de uso
+
+Exemplo do perfil LeetCode usado durante o desenvolvimento:
+
+![Perfil LeetCode](docs/leetcode-profile.png)
+
 ## Uso
 
 ### Ver a descrição de um problema

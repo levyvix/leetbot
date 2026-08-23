@@ -81,6 +81,12 @@ leetbot whoami
 `LEETCODE_SESSION` is a JWT valid for about two weeks. When `whoami` reports a
 session error, repeat the steps above.
 
+## Usage proof
+
+Example of the LeetCode profile used during development:
+
+![LeetCode profile](docs/leetcode-profile.png)
+
 ## Usage
 
 ### Show a problem description
